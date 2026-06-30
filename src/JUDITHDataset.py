@@ -21,8 +21,8 @@ from matplotlib.ticker import EngFormatter
 engfmt = EngFormatter(unit="m", places=None, sep=" ")
 
 import torch
-from torch.utils.data import Dataset, DataLoader
-from torchvision import transforms
+from torch.utils.data import Dataset
+# from torchvision import transforms
 
 
 # suppress warnings from tifffile about truncated images, since some JUDITH images are not perfectly saved
@@ -39,6 +39,87 @@ _scale_pos    = (slice(715,735), slice(770,830))
 _scalelen_pos = (slice(735,760), slice(770,1020))
 # pixel bounds for detector metadata
 _detector_pos = (slice(730,750), slice(370,540))
+
+
+def patchify_fov(img, resolution, fov, stride_meters=None, stride_pixels=None, stride_ratio=None):
+    '''Convert an image into patches of a given field of view (fov) in meters, with optional stride specifications.
+
+    Parameters:
+    - img: 2D numpy array representing the image
+    - resolution: Physical size of a pixel in meters
+    - fov: Field of view in meters (can be a single value or a tuple for height and width)
+    - stride_meters: Optional stride in meters
+    - stride_pixels: Optional stride in pixels
+    - stride_ratio: Optional stride as a fraction of the patch size
+    '''
+
+    if not isinstance(img, np.ndarray) or img.ndim!=2:
+        raise ValueError(f"img must be a 2D numpy array, got {type(img)} with shape {getattr(img, 'shape', None)}")
+
+    h, w = img.shape
+
+    #######################################################################
+    # Convert fov to height/width in meters
+
+    if isinstance(fov, (int, float)):
+        fov_h = fov_w = float(fov)
+    else:
+        fov_h, fov_w = map(float, fov)
+
+    if fov_h <= 0 or fov_w <= 0:
+        raise ValueError(f"fov must be positive, got {fov!r}")
+
+    # convert fov from meters to pixels using resolution metadata, ensuring at least 1 pixel
+    ph = max(1, int(np.ceil(fov_h / resolution)))
+    pw = max(1, int(np.ceil(fov_w / resolution)))
+
+    #######################################################################
+    # Determine stride in pixels
+
+    if stride_meters is None and stride_pixels is None and stride_ratio is None:
+        # Default stride is equal to patch size (non-overlapping patches)
+        sh, sw = ph, pw
+    elif stride_ratio is not None:
+        # Stride is a fraction of the patch size
+        if stride_ratio <= 0:
+            raise ValueError("stride_ratio must be positive")
+        sh = max(1, int(np.round(ph * float(stride_ratio))))
+        sw = max(1, int(np.round(pw * float(stride_ratio))))
+    elif stride_pixels is not None:
+        # Stride is specified directly in pixels
+        if isinstance(stride_pixels, int):
+            stride_pixels = (stride_pixels, stride_pixels)
+        elif stride_pixels is not None:
+            stride_pixels = tuple(stride_pixels)
+        sh, sw = stride_pixels
+    else:
+        # Stride is specified in physical units (microns), convert to pixels
+        if isinstance(stride_meters, (int, float)):
+            stride_meters = (float(stride_meters), float(stride_meters))
+        elif stride_meters is not None:
+            stride_meters = tuple(map(float, stride_meters))
+        sh = max(1, int(np.round(float(stride_meters[0]) / resolution)))
+        sw = max(1, int(np.round(float(stride_meters[1]) / resolution)))
+
+    #######################################################################
+
+    # skip images smaller than patch size
+    if ph > h or pw > w:
+        return np.empty((0, ph, pw), dtype=img.dtype)
+
+    windows = np.lib.stride_tricks.sliding_window_view(img, (ph, pw))
+    windows = windows[::sh, ::sw, :, :]
+    ny, nx = windows.shape[0], windows.shape[1]
+    image_patches = windows.reshape(-1, ph, pw)
+
+
+    # # Find maximum patch size across all images to pad smaller patches
+    # max_ph = max(p.shape[1] for p in all_patches)
+    # max_pw = max(p.shape[2] for p in all_patches)
+
+    # resized = [sk_resize(patches, (patches.shape[0], max_ph, max_pw), order=1, mode="reflect", preserve_range=True, anti_aliasing=False) for patches in all_patches]
+
+    return image_patches
 
 
 def pad_to_shape(im, shape, val=255):
@@ -133,23 +214,23 @@ def label_visual_metadata(unique_items, is_float=False, title_prefix=""):
 # Grain size ranges (in microns) for each material, condition, and view (tv - top view, cs - cross section)
 _grain_sizes = {
     'M192 - W-UHP':  {
-        'as_received':    {'tv': (53.2,66.7), 'cs': (48.3,169.5)},
+        'as received':    {'tv': (53.2,66.7), 'cs': (48.3,169.5)},
         'recrystallised': {'tv': (76,125.9),  'cs': (74.2,146.9)}
     },
     'M193 - WVMW':   {
-        'as_received':    {'tv': (17.4,34.9), 'cs': (10.2,45.8)},
+        'as received':    {'tv': (17.4,34.9), 'cs': (10.2,45.8)},
         'recrystallised': {'tv': (40.9,68),   'cs': (38.8,75)}
     },
     'M194 - WTa1':   {
-        'as_received':    {'tv': (9.5,17.7),  'cs': (5.6,16.4)},
+        'as received':    {'tv': (9.5,17.7),  'cs': (5.6,16.4)},
         'recrystallised': {'tv': (18,27.2),   'cs': (14.5,23.9)}
     },
     'M195 - WTa5':   {
-        'as_received':    {'tv': (9.5,17.7),  'cs': (5.6,16.4)},
+        'as received':    {'tv': (9.5,17.7),  'cs': (5.6,16.4)},
         'recrystallised': {'tv': (18,27.2),   'cs': (14.5,23.9)}
     },
     'M196 - pure W': {
-        'as_received':    {'tv': (40,121),    'cs': (42.3,264.0)},
+        'as received':    {'tv': (40,121),    'cs': (42.3,264.0)},
         'recrystallised': {'tv': (50.6,78.7), 'cs': (37.7,68.1)}
     }
 }
@@ -370,13 +451,13 @@ def dataset_metadata_from_path(top_path, testmatrix_file="Testmatrix JUDITH 1.xl
     #########################################################################################################
     # label grain sizes for each material and load type using the predefined _grain_sizes dictionary
 
-    metadata['grain_size_tv_min'] = np.full_like(metadata['base_temp'], np.nan, dtype=float)
-    metadata['grain_size_tv_max'] = np.full_like(metadata['base_temp'], np.nan, dtype=float)
-    metadata['grain_size_cs_min'] = np.full_like(metadata['base_temp'], np.nan, dtype=float)
-    metadata['grain_size_cs_max'] = np.full_like(metadata['base_temp'], np.nan, dtype=float)
+    metadata['grain_size_tv_min'] = np.full_like(metadata['resolution'], np.nan, dtype=float)
+    metadata['grain_size_tv_max'] = np.full_like(metadata['resolution'], np.nan, dtype=float)
+    metadata['grain_size_cs_min'] = np.full_like(metadata['resolution'], np.nan, dtype=float)
+    metadata['grain_size_cs_max'] = np.full_like(metadata['resolution'], np.nan, dtype=float)
     for material in np.unique(metadata['material']):
         for loadtype in np.unique(metadata['loadtype']):
-            grain_size = _grain_sizes.get(material, {}).get(loadtype, {'tv': (np.nan, np.nan), 'cs': (np.nan, np.nan)})
+            grain_size = _grain_sizes.get(str(material), {}).get(str(loadtype), {'tv': (np.nan, np.nan), 'cs': (np.nan, np.nan)})
             mask = (metadata['material']==material) & (metadata['loadtype']==loadtype)
             metadata['grain_size_tv_min'][mask] = grain_size['tv'][0]
             metadata['grain_size_tv_max'][mask] = grain_size['tv'][1]
@@ -660,6 +741,8 @@ class JUDITHDataset(Dataset):
         if self.preload:
             out._images = self._images[mask, :, :]
 
+        if return_mask:
+            return out, mask
         return out
 
 
@@ -829,45 +912,65 @@ class JUDITHDataset(Dataset):
 
 
     def plot_test_matrix(self, filter_criteria=None, field='crack_density', cmap='viridis', what_to_show='heatmaps'):
+        '''Plot a test matrix of the dataset, showing the specified metadata field as heatmaps or circle maps.
+
+        Parameters:
+        - filter_criteria: dict of metadata fields to filter the dataset before plotting (e.g. {'material': 'M196 - pure W'})
+        - field: metadata field to visualize (default: 'crack_density')
+        - cmap: colormap for heatmaps (default: 'viridis')
+        - what_to_show: 'heatmaps', 'circle maps', or 'label' to determine the visualization style
+        '''
         from matplotlib.patches import Rectangle, Circle
 
         filtered_dataset = self.filter_by_metadata(filter_criteria, invert=False, return_mask=False)
 
-        vmin = 1.0 * np.nanmin(filtered_dataset.metadata[field]) + 0.005 # add small offset to avoid zero radius circles
-        vmax = 1.0 * np.nanmax(filtered_dataset.metadata[field]) + 0.01
+        # Build a test matrix of the specified field for each combination of load type, material, flux, and base temperature
+        test_matrix = {}
+        for load_type in self.unique_meta['loadtype']:
+            for material in self.unique_meta['material']:
+                for flux in self.unique_meta['flux']:
+                    for base_temp in self.unique_meta['base_temp']:
+                        testmat_dataset = filtered_dataset.filter_by_metadata(material=material, loadtype=load_type, flux=flux, base_temp=base_temp)
+                        if len(testmat_dataset)>0:
+                            if field=='num images':
+                                test_matrix[(load_type, material, flux, base_temp)] = len(testmat_dataset)
+                            else:
+                                test_matrix[(load_type, material, flux, base_temp)] = np.nanmean(testmat_dataset.metadata[field])
+        vmin = 0
+        vmax = np.max(list(test_matrix.values()))
 
         # what_to_show = 'heatmaps' # 'heatmaps', 'circle maps', 'label'
         # cmap = 'viridis' # 'binary', 'gray', 'hot', 'viridis', 'plasma', 'inferno', 'magma', 'cividis'
 
-        num_cols = len(np.unique(filtered_dataset.metadata['material']))
-        num_rows = len(np.unique(filtered_dataset.metadata['loadtype']))
+        num_cols = len(self.unique_meta['material'])
+        num_rows = len(self.unique_meta['loadtype'])
         if what_to_show in ['heatmaps', 'label']:
-            width = 4.5
+            width  = 3.7
             height = 4.0
         else:
-            width = 3.8
+            width  = 3.4
             height = 4.0
 
-        fig, axes = plt.subplots(num_rows, num_cols, figsize=(width*num_cols, height*num_rows))
-        fig.tight_layout(h_pad=1.0, w_pad=1.0)
+        fig, axes = plt.subplots(num_rows, num_cols,
+            figsize=(width*num_cols, height*num_rows),
+            constrained_layout=True,
+            gridspec_kw={
+                "wspace": 0.03,   # reduce horizontal spacing
+                "hspace": 0.05    # keep vertical spacing
+            })
 
-        for axj, (load_type, axrow) in enumerate(zip(np.unique(filtered_dataset.metadata['loadtype']), axes)):
-            for axi, (material, ax) in enumerate(zip(np.unique(filtered_dataset.metadata['material']), axrow)):
-                mat_load_dataset = filtered_dataset.filter_by_metadata(material=material, loadtype=load_type)
-
-                dnst = np.full((len(filtered_dataset.unique_meta['flux']), len(filtered_dataset.unique_meta['base_temp'])), np.nan)
+        for axj, (load_type, axrow) in enumerate(zip(self.unique_meta['loadtype'], axes)):
+            for axi, (material, ax) in enumerate(zip(self.unique_meta['material'], axrow)):
+                arr = np.full((len(filtered_dataset.unique_meta['flux']), len(filtered_dataset.unique_meta['base_temp'])), np.nan)
 
                 for i, flux in enumerate(filtered_dataset.unique_meta['flux']):
                     for j, base_temp in enumerate(filtered_dataset.unique_meta['base_temp']):
-                        flux_temp_dataset = mat_load_dataset.filter_by_metadata(flux=flux, base_temp=base_temp)
-                        if len(flux_temp_dataset) == 0:
-                            continue
-                        dnst[i, j] = flux_temp_dataset.metadata[field].mean()
+                        arr[i, j] = test_matrix.get((load_type, material, flux, base_temp), np.nan)
 
-                nrows, ncols = dnst.shape
+                nrows, ncols = arr.shape
 
                 if what_to_show == 'heatmaps':
-                    last_im = ax.imshow(dnst, cmap=cmap, vmin=vmin, vmax=vmax, origin='lower', aspect='equal')
+                    last_im = ax.imshow(arr, cmap=cmap, vmin=vmin, vmax=vmax, origin='lower', aspect='equal')
                     # ---- axis labeling using GLOBAL grid ----
                     ax.set_xticks(np.arange(len(filtered_dataset.unique_meta['base_temp'])))
                     ax.set_xticklabels([f'{t:g}' for t in filtered_dataset.unique_meta['base_temp']], rotation=45)
@@ -896,9 +999,8 @@ class JUDITHDataset(Dataset):
                     # Draw white boxes for each cell
                     for i in range(nrows):
                         for j in range(ncols):
-                            val = dnst[i, j]
+                            val = arr[i, j]
 
-                            # Skip NaNs or empty entries
                             if not np.isnan(val):
                                 ax.add_patch(Rectangle((j - 0.5, i - 0.5), 1, 1, facecolor='gray', alpha=0.2, edgecolor='k', linewidth=0.3))
                             else:
@@ -906,7 +1008,6 @@ class JUDITHDataset(Dataset):
                                 continue
 
                             # Map value to circle radius
-                            # max radius = 0.5 so largest circle fills the box
                             frac = (val - vmin) / (vmax - vmin)
                             frac = np.clip(frac, 0, 1)
                             radius = 0.5 * frac
@@ -921,21 +1022,37 @@ class JUDITHDataset(Dataset):
                 if axj == num_rows - 1:
                     ax.set_xlabel(f"Base temperature, °C", fontsize=12)
 
-                ax.set_xticks(np.arange(len(filtered_dataset.unique_meta['base_temp'])))
-                ax.set_xticklabels([f'{t:g}' for t in filtered_dataset.unique_meta['base_temp']], rotation=45)
-                ax.set_yticks(np.arange(len(filtered_dataset.unique_meta['flux'])))
-                ax.set_yticklabels([f'{f:g}' for f in filtered_dataset.unique_meta['flux']])
+                # disable ticks for all but the bottom row and leftmost column
+                if axj == num_rows - 1:
+                    ax.set_xticks(np.arange(len(self.unique_meta['base_temp'])))
+                    ax.set_xticklabels([f'{t:g}' for t in self.unique_meta['base_temp']], rotation=45)
+                else:
+                    ax.set_xticks([])
+                if axi == 0:
+                    ax.set_yticks(np.arange(len(self.unique_meta['flux'])))
+                    ax.set_yticklabels([f'{f:g}' for f in self.unique_meta['flux']])
+                else:
+                    ax.set_yticks([])
+
 
                 # Match cell boundaries exactly
                 ax.set_xlim(-0.5, ncols - 0.5)
                 ax.set_ylim(-0.5, nrows - 0.5)
                 ax.set_aspect('equal')
 
+        field_str = ''
+        if field == 'crack_density':
+            field_str = 'Crack density (%)'
+        elif field == 'num images':
+            field_str = 'Number of images'
+        else:
+            field_str = field
+
         if what_to_show in ['heatmaps', 'label']:
             # ---------- shared colorbar ----------
-            # if last_im is not None:
-            cbar = fig.colorbar(last_im, ax=axes, location="right", shrink=1, pad=0.02, label=f'{field}')
-            # cbar.set_label('Crack density')
+            cbar = fig.colorbar(last_im, ax=axes, location="right", shrink=1, pad=0.02)
+            # cbar.ax.tick_params(labelsize=12)
+            # cbar.set_label(f'{field_str}', fontsize=14)
 
         if np.unique(filtered_dataset.metadata['detector']).size == 1:
             detector = filtered_dataset.metadata['detector'][0]
@@ -943,9 +1060,9 @@ class JUDITHDataset(Dataset):
             detector = 'multiple detectors'
         if np.unique(filtered_dataset.metadata['scale']).size == 1:
             scale = filtered_dataset.metadata['scale'][0]
-            plt.suptitle(f"Crack density across materials and conditions, {engfmt(scale)} scale, {detector} detector", fontsize=20, x=0.5, y=1.05)
+            plt.suptitle(f"{field_str} across materials and conditions, {engfmt(scale)} scale, {detector} detector", fontsize=20, x=0.5, y=1.05)
         else:
-            plt.suptitle(f"Crack density across materials and conditions, multiple scales, {detector} detector", fontsize=20, x=0.5, y=1.05)
+            plt.suptitle(f"{field_str} across materials and conditions, multiple scales, {detector} detector", fontsize=20, x=0.5, y=1.05)
         plt.show()
 
 
@@ -1014,17 +1131,128 @@ if __name__ == "__main__":
     # Save updated metadata to file
     np.savez(Path(top_path, "metadata.npz"), **dataset.metadata)
 
-    # # Create DataLoader
-    # dataloader = DataLoader(
-    #     dataset,
-    #     batch_size=32,
-    #     shuffle=True,
-    #     num_workers=4
-    # )
 
-    # # Iterate
-    # for batch_idx, (images, metadata) in enumerate(dataloader):
-    #     print(f"Batch {batch_idx}: images shape {images.shape}")
-    #     print(f"Materials: {metadata['material']}")
-    #     print(f"Base temps: {metadata['base_temp']}")
-    #     # Train/evaluate here
+    # #############################################################
+    # # Computing encodings for each image using a pretrained model and saving them to a file
+    # print("Computing encodings for each image using a pretrained model...")
+
+    # import torch
+    # from transformers import AutoImageProcessor, AutoModel
+    # from accelerate import Accelerator
+    # from PIL import Image
+    # from tqdm.auto import tqdm
+
+    # ##################################
+    # # Select GPU with maximum memory
+    # dev_with_max_mem = 0
+    # max_mem = 0
+    # for i in range(torch.cuda.device_count()):
+    #     props = torch.cuda.get_device_properties(i)
+    #     print(f"--- GPU {i} ---")
+    #     print(f"Name: {props.name}")
+    #     print(f"Total Memory: {props.total_memory / (1024 ** 3):.2f} GB")
+    #     print(f"Multiprocessors: {props.multi_processor_count}")
+    #     print(f"Compute Capability: {props.major}.{props.minor}")
+    #     if max_mem<props.total_memory:
+    #         max_mem = props.total_memory
+    #         dev_with_max_mem = i
+    #     print()
+    # torch.cuda.set_device(dev_with_max_mem)
+    # print('Selected GPU: ', torch.cuda.get_device_name(torch.cuda.current_device()))
+
+    # # set device
+    # device = Accelerator().device
+    # ##################################
+
+    # texture_dataset, texture_data_mask = dataset.filter_by_metadata(detector=detector, resolution=lambda a: np.logical_and(a>3e-8, a<5e-6), return_mask=True)
+
+    # model_name = 'facebook/dinov2-base'
+    # processor = AutoImageProcessor.from_pretrained(model_name)
+    # model = AutoModel.from_pretrained(model_name)
+    # model = model.to(device)
+    # model.eval()
+
+    # patch_size_dino = model.config.patch_size
+    # hidden_dim_dino = model.config.hidden_size
+    # print(f"DINO (patch size, hidden dim): ({patch_size_dino}, {hidden_dim_dino})")
+
+    # batch_size = 64
+
+    # fovs = [10,20,30,50,75,100,200] # in microns
+
+    # encodings = {}
+
+    # for fov in fovs:
+    #     print(f"Processing fov {fov} microns...")
+
+    #     data_encodings = np.full((len(dataset), hidden_dim_dino), np.nan)
+    #     texture_data_encodings = np.full((len(texture_dataset), hidden_dim_dino), np.nan)
+    #     for lbl_i, lbl in enumerate(tqdm(texture_dataset.unique_meta['label'], desc=f"FOV ({fov}um)", leave=False)):
+    #         experiment_dataset, mask = texture_dataset.filter_by_metadata(label=lbl, return_mask=True)
+    #         lbl_data_encodings = np.full((len(experiment_dataset), hidden_dim_dino), np.nan)
+
+    #         all_patches = [patchify_fov(data, resolution, fov*1e-6, stride_ratio=1.0) for data,resolution in zip(experiment_dataset.data, experiment_dataset.metadata['resolution'])]
+
+    #         for imgi, img_patches in tqdm(enumerate(all_patches), total=len(all_patches), desc=f"   Label ({lbl})", leave=False):
+    #             if len(img_patches)>0:
+    #                 num_batches = int(np.ceil(len(img_patches) / batch_size))
+    #                 with torch.no_grad():
+    #                     img_patches_dino_embeddings = []
+    #                     for batch_idx in range(num_batches):
+    #                         start_idx = batch_idx * batch_size
+    #                         end_idx = min((batch_idx + 1) * batch_size, len(img_patches))
+
+    #                         # Get patches for this batch and reshape to 2D
+    #                         batch_patches_2d = img_patches[start_idx:end_idx]
+
+    #                         # Convert to 3-channel images (stack grayscale 3 times)
+    #                         batch_images = np.stack([batch_patches_2d] * 3, axis=-1)
+
+    #                         # Convert to PIL Images for processor
+    #                         pil_images = [Image.fromarray(img.astype(np.uint8)) for img in batch_images]
+
+    #                         # Process through DINO
+    #                         inputs  = processor(images=pil_images, return_tensors="pt").to(device)
+    #                         outputs = model(**inputs)
+
+    #                         last_hidden_states = outputs.last_hidden_state  # [batch_size, num_patches + 1, hidden_dim]
+
+    #                         # Extract patch embeddings (skip CLS token at index 0)
+    #                         # patch_embeddings = last_hidden_states[:, 1:, :]  # Skip CLS token
+
+    #                         # # Average pool across spatial dimensions to get single embedding per patch
+    #                         # patch_embeddings_pooled = patch_embeddings.mean(dim=1)  # [batch_size, hidden_dim]
+
+    #                         # CLS token embedding (first token) can be used as a representation of the entire image
+    #                         patch_embeddings = last_hidden_states[:, 0, :] # [batch_size, hidden_dim]
+
+    #                         img_patches_dino_embeddings.append(patch_embeddings.cpu().numpy())
+
+    #                         # if (batch_idx + 1) % 10 == 0:
+    #                         #     print(f"  Processed {end_idx}/{len(img_patches)} patches")
+
+    #                     # average the encodings for all patches of this image to get a single encoding for that image
+    #                     lbl_data_encodings[imgi, :] = np.mean(np.vstack(img_patches_dino_embeddings), axis=0)
+    #         # average the encodings for all images with the same label to get a single encoding for that label/experiment
+    #         texture_data_encodings[mask, :] = lbl_data_encodings.mean(axis=0, keepdims=True)
+
+    #     data_encodings[texture_data_mask, :] = texture_data_encodings
+
+    #     encodings[f'dino2_encoding_fov{fov}'] = data_encodings
+
+    # np.savez(Path(top_path, "encodings.npz"), **encodings)
+
+    # # # Create DataLoader
+    # # dataloader = DataLoader(
+    # #     dataset,
+    # #     batch_size=32,
+    # #     shuffle=True,
+    # #     num_workers=4
+    # # )
+
+    # # # Iterate
+    # # for batch_idx, (images, metadata) in enumerate(dataloader):
+    # #     print(f"Batch {batch_idx}: images shape {images.shape}")
+    # #     print(f"Materials: {metadata['material']}")
+    # #     print(f"Base temps: {metadata['base_temp']}")
+    # #     # Train/evaluate here
