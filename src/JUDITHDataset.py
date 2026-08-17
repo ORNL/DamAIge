@@ -34,6 +34,30 @@ from tqdm.auto import tqdm
 logging.getLogger('tifffile').setLevel(logging.CRITICAL)
 
 
+
+def gpu_selector():
+    # Select GPU with maximum memory
+
+    dev_with_max_mem = 0
+    max_mem = 0
+    for i in range(torch.cuda.device_count()):
+        props = torch.cuda.get_device_properties(i)
+        print(f"--- GPU {i} ---")
+        print(f"Name: {props.name}")
+        print(f"Total Memory: {props.total_memory / (1024 ** 3):.2f} GB")
+        print(f"Multiprocessors: {props.multi_processor_count}")
+        print(f"Compute Capability: {props.major}.{props.minor}")
+        if max_mem<props.total_memory:
+            max_mem = props.total_memory
+            dev_with_max_mem = i
+        print()
+    torch.cuda.set_device(dev_with_max_mem)
+    print('Selected GPU: ', torch.cuda.get_device_name(torch.cuda.current_device()))
+
+    # set device
+    return Accelerator().device
+
+
 ################################################################################
 # Utility functions for labeling metadata fields with visual representations and interactive text boxes
 
