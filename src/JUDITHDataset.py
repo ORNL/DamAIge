@@ -1101,30 +1101,159 @@ class JUDITHDataset(Dataset):
             # cbar.set_label(f'{field_str}', fontsize=14)
 
         if np.unique(filtered_dataset.metadata['detector']).size == 1:
-            detector = filtered_dataset.metadata['detector'][0]
+            detector = f"{filtered_dataset.metadata['detector'][0]} detector"
         else:
             detector = 'multiple detectors'
         if np.unique(filtered_dataset.metadata['scale']).size == 1:
             scale = filtered_dataset.metadata['scale'][0]
             plt.suptitle(f"{field_str} across materials and conditions, {engfmt(scale)} scale, {detector} detector", fontsize=20, x=0.5, y=1.05)
         else:
-            plt.suptitle(f"{field_str} across materials and conditions, multiple scales, {detector} detector", fontsize=20, x=0.5, y=1.05)
+            plt.suptitle(f"{field_str} across materials and conditions, multiple scales, {detector}", fontsize=20, x=0.5, y=1.05)
         plt.show()
 
 
-################################################################################
+
+class JUDITHPatchDataset(JUDITHDataset):
+    """PyTorch Dataset for JUDITH tungsten thermal-shock images, returning patches of a specified field of view (FOV) with a given stride ratio.
+    Data and metadata are kept at the image level, and converted to patches only at __getitem__
+    """
+
+    def __init__(self, fov, stride_ratio, data_path=None, transforms=None, filter_criteria=None, normalize=True, preload=False, data_pos=None, remove_nan=True):
+        super().__init__(data_path=data_path, transforms=transforms, filter_criteria=filter_criteria, normalize=normalize, preload=preload, data_pos=data_pos, remove_nan=remove_nan)
+        # Capture all local arguments, excluding 'self'
+        self.args = locals()
+        del self.args['self']
+        del self.args['__class__']
+
+        self.fov = fov
+        self.stride_ratio = stride_ratio
+
+        # Precompute the total number of patches across all images in the dataset
+        num_patches = 0
+        self.num_patches_per_image = []
+        # self.patches = []
+        for i in range(super().__len__()):
+            img, meta = super().__getitem__(i)
+            img = img.squeeze(0).numpy()  # Get the image as a numpy array
+            patches = patchify_fov(img, meta['resolution'].numpy(), self.fov, stride_meters=None, stride_pixels=None, stride_ratio=self.stride_ratio, flatten=False)
+            self.num_patches_per_image.append(patches.shape[0] * patches.shape[1])
+            # self.patches.append(patches)
+            num_patches += self.num_patches_per_image[-1]
+        self.cumulative_patches = np.cumsum(self.num_patches_per_image)
+        self._cached_num_patches = num_patches
 
 
-if __name__ == "__main__":
-    from crack_identification import find_cracks
+    def idx_to_img_idx(self, idx):
+        """Convert a global patch index to the corresponding image index and local patch index within that image."""
+        if idx < 0 or idx >= self._cached_num_patches:
+            raise IndexError(f"Index {idx} is out of bounds for total patches {self._cached_num_patches}")
 
-    top_path = Path("../data/JUDITH")
+        img_idx = np.searchsorted(self.cumulative_patches, idx, side='right')
+        local_patch_idx = idx - (self.cumulative_patches[img_idx - 1] if img_idx > 0 else 0)
+        return img_idx, local_patch_idx
 
-    #############################################################
-    print("Generating dataset metadata from images and Excel test matrix...")
 
-    dataset_metadata = dataset_metadata_from_path(top_path)
-    np.savez(Path(top_path, "metadata.npz"), **dataset_metadata)
+    def img_idx_to_patches(self, img_idx, flatten=True):
+        # Get the image as a numpy array
+        img = super().__getitem__(img_idx)[0].squeeze(0).numpy()
+        return patchify_fov(img, self.metadata['resolution'][img_idx], self.fov, stride_meters=None, stride_pixels=None, stride_ratio=self.stride_ratio, flatten=flatten)
+
+
+    def __len__(self):
+        return self._cached_num_patches
+
+
+    def __getitem__(self, idx):
+        '''Get a patch from the dataset based on the global patch index.
+        Returns the patch and its associated metadata.
+        '''
+        flip = False
+        if idx >= self._cached_num_patches:
+            flip = True
+            idx = idx - self._cached_num_patches
+
+        img_idx, local_patch_idx = self.idx_to_img_idx(idx)
+        img = super().__getitem__(img_idx)[0].squeeze(0).numpy()  # Get the image as a numpy array
+
+        if flip:
+            img = np.flip(img, axis=(0, 1)).copy() # copy to avoid negative strides in memory layout
+        patches = patchify_fov(img, self.metadata['resolution'][img_idx], self.fov, stride_meters=None, stride_pixels=None, stride_ratio=self.stride_ratio, flatten=False)
+
+        local_patch_idx_i = local_patch_idx // patches.shape[1]
+        local_patch_idx_j = local_patch_idx % patches.shape[1]
+
+        patch = torch.from_numpy(patches[local_patch_idx_i, local_patch_idx_j].copy()).unsqueeze(0)
+
+        # Prepare metadata dict for this sample
+        sample_metadata = {
+            'filename': self.metadata['filename'][img_idx],
+            'material': self.metadata['material'][img_idx],
+            'loadtype': self.metadata['loadtype'][img_idx],
+            'label': self.metadata['label'][img_idx],
+            'base_temp': torch.tensor(self.metadata['base_temp'][img_idx], dtype=torch.float32),
+            'flux': torch.tensor(self.metadata['flux'][img_idx], dtype=torch.float32),
+            'scale': torch.tensor(self.metadata['scale'][img_idx], dtype=torch.float32),
+            'resolution': torch.tensor(self.metadata['resolution'][img_idx], dtype=torch.float32),
+        }
+
+        return patch, sample_metadata
+
+
+    def plot_patch_overlays(self, img_idx, pattern='all', show=True, ax=None):
+        '''Plot the original image with overlaid patch boundaries for a given image index.
+        Useful for visualizing how patches are extracted from the image.
+        '''
+        from matplotlib.patches import Rectangle
+
+        if ax is None:
+            ax = plt.gca()
+
+        if img_idx >= 2*super().__len__():
+            raise IndexError(f"Image index {img_idx} is out of bounds for total images {2*super().__len__()} (including flipped images)")
+
+        flip = False
+        if img_idx >= super().__len__():
+            flip = True
+            img_idx = img_idx - super().__len__()
+
+        img = super().__getitem__(img_idx)[0].squeeze(0).numpy()  # Get the image as a numpy array
+        if flip:
+            img = np.flip(img, axis=(0, 1)).copy() # copy to avoid negative strides in memory layout
+
+        ax.imshow(img, cmap='gray')
+
+        # Calculate patch size in pixels
+        resolution = self.metadata["resolution"][img_idx]
+        patch_size_pixels = int(np.ceil(self.fov / resolution))
+        stride_pixels = max(1, int(np.round(patch_size_pixels * self.stride_ratio)))
+
+        if pattern == 'all':
+            for i in range(0, img.shape[0] - patch_size_pixels + 1, stride_pixels):
+                for j in range(0, img.shape[1] - patch_size_pixels + 1, stride_pixels):
+                    rect = Rectangle((j, i), patch_size_pixels, patch_size_pixels, linewidth=1, edgecolor='red', facecolor='none', linestyle='-')
+                    ax.add_patch(rect)
+        elif pattern == 'diagonal':
+            for i in range(0, img.shape[0] - patch_size_pixels + 1, stride_pixels):
+                j = i  # diagonal
+                if j < img.shape[1] - patch_size_pixels + 1:
+                    rect = Rectangle((j, i), patch_size_pixels, patch_size_pixels, linewidth=1, edgecolor='red', facecolor='none', linestyle='-')
+                    ax.add_patch(rect)
+
+        # Add label for the patch
+        ax.text(20 + patch_size_pixels/2, 20 + patch_size_pixels/2, f'{engfmt(self.fov)}',
+                    color='red', fontsize=14, ha='center', va='bottom',
+                    bbox=dict(boxstyle='round,pad=0.3', facecolor='white', alpha=0.7))
+
+        title_str = f'Resolution: {engfmt(resolution)}, scale: {engfmt(self.metadata["scale"][img_idx])}'
+        # if plot_patch:
+        #      title_str += f', full patches: {num_patches_x}x{num_patches_y}'
+        ax.set_title(title_str, fontsize=14)
+        ax.axis('off')
+
+        if show:
+            plt.show()
+
+
 
     #############################################################
     # Loop through all material-loadtype combinations and compute crack densities for each flux and base_temp
