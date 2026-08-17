@@ -1302,8 +1302,7 @@ def evaluate_crack_densities(dataset):
         )
         dataset.metadata['crack_density'][mask] = den
 
-    # Save updated metadata to file
-    np.savez(Path(top_path, "metadata.npz"), **dataset.metadata)
+    return dataset
 
 
     # #############################################################
