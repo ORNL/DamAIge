@@ -19,7 +19,7 @@ import tifffile
 import matplotlib.pyplot as plt
 import matplotlib.widgets as widgets
 from matplotlib.ticker import EngFormatter
-engfmt = EngFormatter(unit="m", places=None, sep=" ")
+engfmt = EngFormatter(unit="m", places=0, sep=" ")
 
 import torch
 from torch.utils.data import Dataset
