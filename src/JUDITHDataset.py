@@ -621,6 +621,10 @@ class JUDITHDataset(Dataset):
     """
 
     def __init__(self, data_path=None, transforms=None, filter_criteria=None, normalize=True, preload=False, data_pos=None, remove_nan=True):
+        # Capture all local arguments, excluding 'self'
+        self.args = locals()
+        del self.args['self']
+
         if data_path is None:
             data_path = Path(Path(__file__).resolve().parents[1], "data/JUDITH")
         if data_pos is None:
@@ -765,8 +769,11 @@ class JUDITHDataset(Dataset):
 
         _, mask = metadata_filter(self.metadata, merged_criteria, invert=invert, return_mask=True)
 
-        out = JUDITHDataset(filter_criteria=merged_criteria, preload=False, remove_nan=self.remove_nan)
+        args = self.args.copy()
+        args.update({'filter_criteria': merged_criteria, 'preload': False})
+        out = type(self)(**args)
         out.preload = self.preload  # keep the same preload setting as the original dataset
+        # no need to read data again
         if self.preload:
             out._images = self._images[mask, :, :]
 
