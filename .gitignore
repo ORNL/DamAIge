@@ -1,2 +1,4 @@
 data/JUDITH/
 data/sim_data_small/
+
+__pycache__/
