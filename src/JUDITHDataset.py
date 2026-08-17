@@ -70,7 +70,7 @@ _scalelen_pos = (slice(735,760), slice(770,1020))
 _detector_pos = (slice(730,750), slice(370,540))
 
 
-def patchify_fov(img, resolution, fov, stride_meters=None, stride_pixels=None, stride_ratio=None):
+def patchify_fov(img, resolution, fov, stride_meters=None, stride_pixels=None, stride_ratio=None, *, flatten=False):
     '''Convert an image into patches of a given field of view (fov) in meters, with optional stride specifications.
 
     Parameters:
@@ -80,6 +80,7 @@ def patchify_fov(img, resolution, fov, stride_meters=None, stride_pixels=None, s
     - stride_meters: Optional stride in meters
     - stride_pixels: Optional stride in pixels
     - stride_ratio: Optional stride as a fraction of the patch size
+    - flatten: Optional flag to return a 'list' of patches, i.e., flatten patch index dimension
     '''
 
     if not isinstance(img, np.ndarray) or img.ndim!=2:
@@ -134,13 +135,22 @@ def patchify_fov(img, resolution, fov, stride_meters=None, stride_pixels=None, s
 
     # skip images smaller than patch size
     if ph > h or pw > w:
-        return np.empty((0, ph, pw), dtype=img.dtype)
+        windows = np.empty((0, 0, ph, pw), dtype=img.dtype)
+    else:
+        windows = np.lib.stride_tricks.sliding_window_view(img, (ph, pw))
+        windows = windows[::sh, ::sw, :, :]
 
-    windows = np.lib.stride_tricks.sliding_window_view(img, (ph, pw))
-    windows = windows[::sh, ::sw, :, :]
-    ny, nx = windows.shape[0], windows.shape[1]
-    image_patches = windows.reshape(-1, ph, pw)
+    # if enforce_view:
+    #     if flatten:
+    #         raise ValueError(
+    #             "Cannot enforce a no-copy view with flattened patches. "
+    #             "Use flatten=False to return a 4D sliding-window view."
+    #         )
+    #     return windows
 
+    if flatten:
+        image_patches = windows.reshape(-1, ph, pw)
+        return image_patches
 
     # # Find maximum patch size across all images to pad smaller patches
     # max_ph = max(p.shape[1] for p in all_patches)
@@ -148,7 +158,7 @@ def patchify_fov(img, resolution, fov, stride_meters=None, stride_pixels=None, s
 
     # resized = [sk_resize(patches, (patches.shape[0], max_ph, max_pw), order=1, mode="reflect", preserve_range=True, anti_aliasing=False) for patches in all_patches]
 
-    return image_patches
+    return windows
 
 
 def pad_to_shape(im, shape, val=255):
