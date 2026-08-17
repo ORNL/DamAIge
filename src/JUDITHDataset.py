@@ -1255,11 +1255,10 @@ class JUDITHPatchDataset(JUDITHDataset):
 
 
 
+def evaluate_crack_densities(dataset):
     #############################################################
     # Loop through all material-loadtype combinations and compute crack densities for each flux and base_temp
     print("Extracting crack densities...")
-
-    dataset = JUDITHDataset(preload=True, data_path=top_path, remove_nan=False)
 
     scale = 1.e-3
     detector = 'QBSD'
