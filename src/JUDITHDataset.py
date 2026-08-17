@@ -4,6 +4,7 @@ import re
 import hashlib
 import logging
 import warnings
+from functools import cached_property
 
 import numpy as np
 import pandas as pd
@@ -24,6 +25,10 @@ import torch
 from torch.utils.data import Dataset
 # from torchvision import transforms
 
+from transformers import AutoImageProcessor, AutoModel
+from accelerate import Accelerator
+from PIL import Image
+from tqdm.auto import tqdm
 
 # suppress warnings from tifffile about truncated images, since some JUDITH images are not perfectly saved
 logging.getLogger('tifffile').setLevel(logging.CRITICAL)
