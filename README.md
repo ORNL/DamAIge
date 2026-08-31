@@ -29,6 +29,8 @@ git lfs pull
 uv sync
 ```
 > **Platform note:** `pyproject.toml` uses `[tool.uv].environments` to restrict dependency resolution to a specific operating system. Update configuration marker accordingly (for example, `sys_platform == 'linux'` or `sys_platform == 'win32'`) before running `uv sync`.
+>
+> **PyTorch note:** This project uses the matched `torch==2.9.1` and `torchvision==0.24.1` releases from the PyTorch CUDA 12.8 wheel index. Select a matched Torch/Torchvision pair and wheel index for your GPU and CUDA version, and update `pyproject.toml` before running `uv sync`.
 
 ## Run
 
