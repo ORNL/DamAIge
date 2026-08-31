@@ -28,6 +28,7 @@ git lfs pull
 ```bash
 uv sync
 ```
+> **Platform note:** `pyproject.toml` uses `[tool.uv].environments` to restrict dependency resolution to a specific operating system. Update configuration marker accordingly (for example, `sys_platform == 'linux'` or `sys_platform == 'win32'`) before running `uv sync`.
 
 ## Run
 
