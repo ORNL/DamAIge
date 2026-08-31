@@ -412,13 +412,15 @@ def dataset_metadata_from_path(top_path, testmatrix_file="Testmatrix JUDITH 1.xl
     unique_scales = {}      # key: hash of image, value: image
     unique_detectors = {}   # key: hash of image, value: image
 
-    metadata = {'filename': [], 'material':[], 'loadtype':[], 'label':[], 'base_temp':[], 'flux':[], 'scale':[], 'detector':[], 'resolution':[], 'grain_size_tv':[], 'grain_size_cs':[]}
+    metadata = {'filename': [], 'material':[], 'loadtype':[], 'label':[], 'base_temp':[], 'flux':[], 'scale':[], 'detector':[], 'resolution':[]}
     for material_path in top_path.iterdir():
         if not material_path.is_dir(): continue
         for load_path in Path(material_path).iterdir():
             for img_path in Path(load_path).iterdir():
                 if not '.tif' in str(img_path): continue
-                metadata['filename'].append(str(img_path.resolve()))
+                # strip the top_path prefix from the filename for easier handling
+                # metadata['filename'].append(str(img_path.resolve()))
+                metadata['filename'].append(str(img_path.resolve()).replace(str(top_path.resolve()), '').lstrip('/\\'))
 
                 # original image
                 img = imread(img_path).astype(int)
@@ -629,6 +631,7 @@ class JUDITHDataset(Dataset):
         normalize: Whether to normalize images to [0,1] range
         preload: Whether to preload all images into memory (may require more RAM)
         data_pos: Tuple of slices defining the region of the image containing the actual experiment data (default covers entire image)
+        remove_nan: Whether to remove samples with NaN values in 'base_temp' or 'flux' metadata
     """
 
     def __init__(self, data_path=None, transforms=None, filter_criteria=None, normalize=True, preload=False, data_pos=None, remove_nan=True):
@@ -660,12 +663,15 @@ class JUDITHDataset(Dataset):
             self.metadata = metadata_filter(self.metadata, {'base_temp': lambda x: ~np.isnan(x)}, invert=False, return_mask=False)
             self.metadata = metadata_filter(self.metadata, {'flux': lambda x: ~np.isnan(x)}, invert=False, return_mask=False)
 
+        # Convert filenames to full paths
+        self.filenames = np.array([str(Path(self.data_path, filename)) for filename in self.metadata['filename']], dtype=object)
+
         # Preload images if specified (may require more RAM)
         if self.preload:
-            img = tifffile.imread(self.metadata['filename'][0]).astype(np.float32)
-            num_samples = len(self.metadata['filename'])
+            img = tifffile.imread(self.filenames[0]).astype(np.float32)
+            num_samples = len(self.filenames)
             self._images = np.empty((num_samples, *img.shape), dtype=np.float32)
-            for i, fname in enumerate(self.metadata['filename']):
+            for i, fname in enumerate(self.filenames):
                 self._images[i] = tifffile.imread(fname).astype(np.float32)
 
             self.unique_visual = {
@@ -678,7 +684,7 @@ class JUDITHDataset(Dataset):
 
 
     def __len__(self):
-        return len(self.metadata['filename'])
+        return len(self.filenames)
 
 
     def __getitem__(self, idx):
@@ -686,7 +692,7 @@ class JUDITHDataset(Dataset):
         if self.preload:
             img = self._images[idx]
         else:
-            img_path = self.metadata['filename'][idx]
+            img_path = self.filenames[idx]
             img = tifffile.imread(img_path).astype(np.float32)
 
         # Extract data region
@@ -705,7 +711,7 @@ class JUDITHDataset(Dataset):
 
         # Prepare metadata dict for this sample
         sample_metadata = {
-            'filename': self.metadata['filename'][idx],
+            'filename': self.filenames[idx],
             'material': self.metadata['material'][idx],
             'loadtype': self.metadata['loadtype'][idx],
             'label': self.metadata['label'][idx],
@@ -883,7 +889,10 @@ class JUDITHDataset(Dataset):
 
     @property
     def filenames(self):
-        return self.metadata['filename']
+        return self._filenames
+    @filenames.setter
+    def filenames(self, names):
+        self._filenames = names
 
 
     #############################################################
@@ -1256,36 +1265,43 @@ class JUDITHPatchDataset(JUDITHDataset):
 
 
 
-class JUDITHPatchEncodingDataset(JUDITHPatchDataset):
-    """PyTorch Dataset for JUDITH tungsten thermal-shock images, returning encodings of patches of a specified field of view (FOV) with a given stride ratio.
+class JUDITHDatasetEncoding(JUDITHDataset):
+    """PyTorch Dataset for JUDITH tungsten thermal-shock images, returning encodings of images of a specified field of view (FOV) with a given stride ratio.
     """
 
-    def __init__(self, fov, stride_ratio, data_path=None, transforms=None, filter_criteria=None, normalize=True, preload=False, data_pos=None, remove_nan=True):
-        super().__init__(fov=fov, stride_ratio=stride_ratio, data_path=data_path, transforms=transforms, filter_criteria=filter_criteria, normalize=normalize, preload=preload, data_pos=data_pos, remove_nan=remove_nan)
+    def __init__(self, fov=None, data_path=None, transforms=None, filter_criteria=None, normalize=True, preload=False, data_pos=None, remove_nan=True):
+        super().__init__(data_path=data_path, transforms=transforms, filter_criteria=filter_criteria, normalize=normalize, preload=False, data_pos=data_pos, remove_nan=False)
         # Capture all local arguments, excluding 'self'
         self.args = locals()
         del self.args['self']
         del self.args['__class__']
 
-        self.encoder_name = 'facebook/dinov2-base'
-        self.processor = AutoImageProcessor.from_pretrained(self.encoder_name)
-        self.encoder = AutoModel.from_pretrained(self.encoder_name)
-        self.encoder.eval()
+        self.remove_nan = remove_nan
+
+        all_encodings = dict(np.load(Path(self.data_path, "encodings.npz"), allow_pickle=True))
+
+        if fov is None:
+            raise ValueError("Field of view (fov) must be specified for JUDITHDatasetEncoding. Available FOVs: " + ", ".join([key.split('_')[-1][3:] for key in all_encodings.keys() if key.startswith('dino2_encoding_fov')]))
+
+        key = f'dino2_encoding_fov{fov}'
+
+        encodings = all_encodings[key]
+        if remove_nan:
+            self.mask = ~np.isnan(encodings).any(axis=1)
+            encodings = encodings[self.mask]
+            self.metadata = {k: v[self.mask] for k, v in self.metadata.items()}
+        self.encodings = encodings
+
+
+    def __len__(self):
+        return self.encodings.shape[0]
 
 
     def __getitem__(self, idx):
-        '''Get encoding of patch from the dataset based on the global patch index. Returns the encoding and its associated metadata.
+        '''Get encoding of image from the dataset. Returns the encoding and its associated metadata.
         '''
-        patch, meta = super().__getitem__(idx)
-        patch = patch.expand(3,-1,-1) #.squeeze(0).numpy()  # Get the patch as a numpy array
+        return self.encodings[idx,:], {k: v[idx] for k, v in self.metadata.items()}
 
-        # Encode the patch
-        with torch.no_grad():
-            inputs = self.processor(patch, return_tensors="pt")
-            inputs = {k: v for k, v in inputs.items()}
-            encoding = self.encoder(**inputs).last_hidden_state.mean(dim=1).squeeze(0)
-
-        return encoding, meta
 
 
 
@@ -1342,7 +1358,7 @@ def evaluate_crack_densities(dataset):
     return dataset
 
 
-def compute_encodings(dataset, fovs=[20,50,100,200], batch_size=64, detector='QBSD'):
+def compute_encodings(dataset, fovs=[20,50,100,200], batch_size=64, detector='QBSD', stride_ratio=1.0):
     '''Compute encodings for each image in the dataset using a pretrained model (DINOv2).
     The encodings are computed for different fields of view (FOVs) and stored in the dataset's metadata.
     '''
@@ -1408,7 +1424,7 @@ def compute_encodings(dataset, fovs=[20,50,100,200], batch_size=64, detector='QB
             experiment_dataset, experiment_data_mask = texture_dataset.filter_by_metadata(label=lbl, return_mask=True)
             lbl_data_encodings = np.full((len(experiment_dataset), hidden_dim_dino), np.nan)
 
-            all_patches = [patchify_fov(data, resolution, fov*1e-6, stride_ratio=1.0, flatten=True) for data,resolution in zip(experiment_dataset.data, experiment_dataset.metadata['resolution'])]
+            all_patches = [patchify_fov(data, resolution, fov*1e-6, stride_ratio=stride_ratio, flatten=True) for data,resolution in zip(experiment_dataset.data, experiment_dataset.metadata['resolution'])]
 
             # Loop through each image in the experiment dataset and compute encodings for its patches
             for imgi, img_patches in tqdm(enumerate(all_patches), total=len(all_patches), desc=f"   Label ({lbl})", leave=False):
@@ -1462,6 +1478,9 @@ def compute_encodings(dataset, fovs=[20,50,100,200], batch_size=64, detector='QB
     return encodings
 
 
+################################################################################
+
+
 if __name__ == "__main__":
     from torch.utils.data import DataLoader
     from crack_identification import find_cracks
@@ -1487,5 +1506,5 @@ if __name__ == "__main__":
     #############################################################
     # compute encodings
 
-    encodings = compute_encodings(dataset, fovs=[20,50,100,200], batch_size=64, detector='QBSD')
+    encodings = compute_encodings(dataset, fovs=[20,50,100,200], batch_size=64, detector='QBSD', stride_ratio=0.5)
     np.savez(Path(top_path, "encodings.npz"), **encodings)
