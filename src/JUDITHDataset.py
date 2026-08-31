@@ -1,3 +1,4 @@
+import sys
 from collections.abc import Iterable
 from pathlib import Path
 import re
@@ -1101,12 +1102,12 @@ class JUDITHDataset(Dataset):
             # cbar.set_label(f'{field_str}', fontsize=14)
 
         if np.unique(filtered_dataset.metadata['detector']).size == 1:
-            detector = f"{filtered_dataset.metadata['detector'][0]} detector"
+            detector = f"{filtered_dataset.metadata['detector'][0]}"
         else:
             detector = 'multiple detectors'
         if np.unique(filtered_dataset.metadata['scale']).size == 1:
             scale = filtered_dataset.metadata['scale'][0]
-            plt.suptitle(f"{field_str} across materials and conditions, {engfmt(scale)} scale, {detector} detector", fontsize=20, x=0.5, y=1.05)
+            plt.suptitle(f"{field_str} across materials and conditions, {engfmt(scale)} scale, {detector} detector(s)", fontsize=20, x=0.5, y=1.05)
         else:
             plt.suptitle(f"{field_str} across materials and conditions, multiple scales, {detector}", fontsize=20, x=0.5, y=1.05)
         plt.show()
@@ -1255,6 +1256,42 @@ class JUDITHPatchDataset(JUDITHDataset):
 
 
 
+class JUDITHPatchEncodingDataset(JUDITHPatchDataset):
+    """PyTorch Dataset for JUDITH tungsten thermal-shock images, returning encodings of patches of a specified field of view (FOV) with a given stride ratio.
+    """
+
+    def __init__(self, fov, stride_ratio, data_path=None, transforms=None, filter_criteria=None, normalize=True, preload=False, data_pos=None, remove_nan=True):
+        super().__init__(fov=fov, stride_ratio=stride_ratio, data_path=data_path, transforms=transforms, filter_criteria=filter_criteria, normalize=normalize, preload=preload, data_pos=data_pos, remove_nan=remove_nan)
+        # Capture all local arguments, excluding 'self'
+        self.args = locals()
+        del self.args['self']
+        del self.args['__class__']
+
+        self.encoder_name = 'facebook/dinov2-base'
+        self.processor = AutoImageProcessor.from_pretrained(self.encoder_name)
+        self.encoder = AutoModel.from_pretrained(self.encoder_name)
+        self.encoder.eval()
+
+
+    def __getitem__(self, idx):
+        '''Get encoding of patch from the dataset based on the global patch index. Returns the encoding and its associated metadata.
+        '''
+        patch, meta = super().__getitem__(idx)
+        patch = patch.expand(3,-1,-1) #.squeeze(0).numpy()  # Get the patch as a numpy array
+
+        # Encode the patch
+        with torch.no_grad():
+            inputs = self.processor(patch, return_tensors="pt")
+            inputs = {k: v for k, v in inputs.items()}
+            encoding = self.encoder(**inputs).last_hidden_state.mean(dim=1).squeeze(0)
+
+        return encoding, meta
+
+
+
+################################################################################
+
+
 def evaluate_crack_densities(dataset):
     #############################################################
     # Loop through all material-loadtype combinations and compute crack densities for each flux and base_temp
@@ -1305,127 +1342,150 @@ def evaluate_crack_densities(dataset):
     return dataset
 
 
-    # #############################################################
-    # # Computing encodings for each image using a pretrained model and saving them to a file
-    # print("Computing encodings for each image using a pretrained model...")
+def compute_encodings(dataset, fovs=[20,50,100,200], batch_size=64, detector='QBSD'):
+    '''Compute encodings for each image in the dataset using a pretrained model (DINOv2).
+    The encodings are computed for different fields of view (FOVs) and stored in the dataset's metadata.
+    '''
+    import torch
+    from transformers import AutoImageProcessor, AutoModel
+    from accelerate import Accelerator
+    from PIL import Image
+    from tqdm.auto import tqdm
 
-    # import torch
-    # from transformers import AutoImageProcessor, AutoModel
-    # from accelerate import Accelerator
-    # from PIL import Image
-    # from tqdm.auto import tqdm
+    print("Computing encodings for each image using a pretrained model...")
 
-    # ##################################
-    # # Select GPU with maximum memory
-    # dev_with_max_mem = 0
-    # max_mem = 0
-    # for i in range(torch.cuda.device_count()):
-    #     props = torch.cuda.get_device_properties(i)
-    #     print(f"--- GPU {i} ---")
-    #     print(f"Name: {props.name}")
-    #     print(f"Total Memory: {props.total_memory / (1024 ** 3):.2f} GB")
-    #     print(f"Multiprocessors: {props.multi_processor_count}")
-    #     print(f"Compute Capability: {props.major}.{props.minor}")
-    #     if max_mem<props.total_memory:
-    #         max_mem = props.total_memory
-    #         dev_with_max_mem = i
-    #     print()
-    # torch.cuda.set_device(dev_with_max_mem)
-    # print('Selected GPU: ', torch.cuda.get_device_name(torch.cuda.current_device()))
+    ##################################
+    # Select GPU with maximum memory
+    dev_with_max_mem = 0
+    max_mem = 0
+    for i in range(torch.cuda.device_count()):
+        props = torch.cuda.get_device_properties(i)
+        print(f"--- GPU {i} ---")
+        print(f"Name: {props.name}")
+        print(f"Total Memory: {props.total_memory / (1024 ** 3):.2f} GB")
+        print(f"Multiprocessors: {props.multi_processor_count}")
+        print(f"Compute Capability: {props.major}.{props.minor}")
+        if max_mem<props.total_memory:
+            max_mem = props.total_memory
+            dev_with_max_mem = i
+        print()
+    torch.cuda.set_device(dev_with_max_mem)
+    print('Selected GPU: ', torch.cuda.get_device_name(torch.cuda.current_device()))
 
-    # # set device
-    # device = Accelerator().device
-    # ##################################
+    # set device
+    device = Accelerator().device
+    ##################################
 
-    # texture_dataset, texture_data_mask = dataset.filter_by_metadata(detector=detector, resolution=lambda a: np.logical_and(a>3e-8, a<5e-6), return_mask=True)
+    # Texture dataset uses the specified detector and resolution range (3e-8 to 5e-6)
+    texture_dataset, texture_data_mask = dataset.filter_by_metadata(detector=detector, resolution=lambda a: np.logical_and(a>3e-8, a<5e-6), return_mask=True)
 
-    # model_name = 'facebook/dinov2-base'
-    # processor = AutoImageProcessor.from_pretrained(model_name)
-    # model = AutoModel.from_pretrained(model_name)
-    # model = model.to(device)
-    # model.eval()
+    ##################################
+    # Load pretrained DINOv2 model and processor
 
-    # patch_size_dino = model.config.patch_size
-    # hidden_dim_dino = model.config.hidden_size
-    # print(f"DINO (patch size, hidden dim): ({patch_size_dino}, {hidden_dim_dino})")
+    model_name = 'facebook/dinov2-base'
+    processor = AutoImageProcessor.from_pretrained(model_name)
+    model = AutoModel.from_pretrained(model_name)
+    model = model.to(device)
+    model.eval()
 
-    # batch_size = 64
+    patch_size_dino = model.config.patch_size
+    hidden_dim_dino = model.config.hidden_size
+    print(f"DINO (patch size, hidden dim): ({patch_size_dino}, {hidden_dim_dino})")
 
-    # fovs = [10,20,30,50,75,100,200] # in microns
+    ##################################
 
-    # encodings = {}
+    encodings = {}
 
-    # for fov in fovs:
-    #     print(f"Processing fov {fov} microns...")
+    # Compute encodings for each FOV
+    for fov in fovs:
+        print(f"Processing fov {fov} microns...")
 
-    #     data_encodings = np.full((len(dataset), hidden_dim_dino), np.nan)
-    #     texture_data_encodings = np.full((len(texture_dataset), hidden_dim_dino), np.nan)
-    #     for lbl_i, lbl in enumerate(tqdm(texture_dataset.unique_meta['label'], desc=f"FOV ({fov}um)", leave=False)):
-    #         experiment_dataset, mask = texture_dataset.filter_by_metadata(label=lbl, return_mask=True)
-    #         lbl_data_encodings = np.full((len(experiment_dataset), hidden_dim_dino), np.nan)
+        data_encodings = np.full((len(dataset), hidden_dim_dino), np.nan)
+        texture_data_encodings = np.full((len(texture_dataset), hidden_dim_dino), np.nan)
 
-    #         all_patches = [patchify_fov(data, resolution, fov*1e-6, stride_ratio=1.0) for data,resolution in zip(experiment_dataset.data, experiment_dataset.metadata['resolution'])]
+        # Loop through each unique experiment label in the texture dataset and compute encodings for images with that label
+        for lbl_i, lbl in enumerate(tqdm(texture_dataset.unique_meta['label'], desc=f"FOV ({fov}um)", leave=False)):
+            experiment_dataset, experiment_data_mask = texture_dataset.filter_by_metadata(label=lbl, return_mask=True)
+            lbl_data_encodings = np.full((len(experiment_dataset), hidden_dim_dino), np.nan)
 
-    #         for imgi, img_patches in tqdm(enumerate(all_patches), total=len(all_patches), desc=f"   Label ({lbl})", leave=False):
-    #             if len(img_patches)>0:
-    #                 num_batches = int(np.ceil(len(img_patches) / batch_size))
-    #                 with torch.no_grad():
-    #                     img_patches_dino_embeddings = []
-    #                     for batch_idx in range(num_batches):
-    #                         start_idx = batch_idx * batch_size
-    #                         end_idx = min((batch_idx + 1) * batch_size, len(img_patches))
+            all_patches = [patchify_fov(data, resolution, fov*1e-6, stride_ratio=1.0, flatten=True) for data,resolution in zip(experiment_dataset.data, experiment_dataset.metadata['resolution'])]
 
-    #                         # Get patches for this batch and reshape to 2D
-    #                         batch_patches_2d = img_patches[start_idx:end_idx]
+            # Loop through each image in the experiment dataset and compute encodings for its patches
+            for imgi, img_patches in tqdm(enumerate(all_patches), total=len(all_patches), desc=f"   Label ({lbl})", leave=False):
+                if len(img_patches)>0:
+                    num_batches = int(np.ceil(len(img_patches) / batch_size))
+                    with torch.no_grad():
+                        img_patches_dino_embeddings = []
+                        for batch_idx in range(num_batches):
+                            start_idx = batch_idx * batch_size
+                            end_idx = min((batch_idx + 1) * batch_size, len(img_patches))
 
-    #                         # Convert to 3-channel images (stack grayscale 3 times)
-    #                         batch_images = np.stack([batch_patches_2d] * 3, axis=-1)
+                            # Get patches for this batch and reshape to 2D
+                            batch_patches_2d = img_patches[start_idx:end_idx]
 
-    #                         # Convert to PIL Images for processor
-    #                         pil_images = [Image.fromarray(img.astype(np.uint8)) for img in batch_images]
+                            # Convert to 3-channel images (stack grayscale 3 times)
+                            batch_images = np.stack([batch_patches_2d] * 3, axis=-1)
 
-    #                         # Process through DINO
-    #                         inputs  = processor(images=pil_images, return_tensors="pt").to(device)
-    #                         outputs = model(**inputs)
+                            # Convert to PIL Images for processor
+                            pil_images = [Image.fromarray(img.astype(np.uint8)) for img in batch_images]
 
-    #                         last_hidden_states = outputs.last_hidden_state  # [batch_size, num_patches + 1, hidden_dim]
+                            # Process through DINO
+                            inputs  = processor(images=pil_images, return_tensors="pt").to(device)
+                            outputs = model(**inputs)
 
-    #                         # Extract patch embeddings (skip CLS token at index 0)
-    #                         # patch_embeddings = last_hidden_states[:, 1:, :]  # Skip CLS token
+                            last_hidden_states = outputs.last_hidden_state  # [batch_size, num_patches + 1, hidden_dim]
 
-    #                         # # Average pool across spatial dimensions to get single embedding per patch
-    #                         # patch_embeddings_pooled = patch_embeddings.mean(dim=1)  # [batch_size, hidden_dim]
+                            # Extract patch embeddings (skip CLS token at index 0)
+                            # patch_embeddings = last_hidden_states[:, 1:, :]  # Skip CLS token
 
-    #                         # CLS token embedding (first token) can be used as a representation of the entire image
-    #                         patch_embeddings = last_hidden_states[:, 0, :] # [batch_size, hidden_dim]
+                            # # Average pool across spatial dimensions to get single embedding per patch
+                            # patch_embeddings_pooled = patch_embeddings.mean(dim=1)  # [batch_size, hidden_dim]
 
-    #                         img_patches_dino_embeddings.append(patch_embeddings.cpu().numpy())
+                            # CLS token embedding (first token) can be used as a representation of the entire image
+                            patch_embeddings = last_hidden_states[:, 0, :] # [batch_size, hidden_dim]
 
-    #                         # if (batch_idx + 1) % 10 == 0:
-    #                         #     print(f"  Processed {end_idx}/{len(img_patches)} patches")
+                            img_patches_dino_embeddings.append(patch_embeddings.cpu().numpy())
 
-    #                     # average the encodings for all patches of this image to get a single encoding for that image
-    #                     lbl_data_encodings[imgi, :] = np.mean(np.vstack(img_patches_dino_embeddings), axis=0)
-    #         # average the encodings for all images with the same label to get a single encoding for that label/experiment
-    #         texture_data_encodings[mask, :] = lbl_data_encodings.mean(axis=0, keepdims=True)
+                            # if (batch_idx + 1) % 10 == 0:
+                            #     print(f"  Processed {end_idx}/{len(img_patches)} patches")
 
-    #     data_encodings[texture_data_mask, :] = texture_data_encodings
+                        # average the encodings for all patches of this image to get a single encoding for that image
+                        lbl_data_encodings[imgi, :] = np.mean(np.vstack(img_patches_dino_embeddings), axis=0)
+            # average the encodings for all images with the same label to get a single encoding for that label/experiment
+            texture_data_encodings[experiment_data_mask, :] = lbl_data_encodings.mean(axis=0, keepdims=True)
 
-    #     encodings[f'dino2_encoding_fov{fov}'] = data_encodings
+        data_encodings[texture_data_mask, :] = texture_data_encodings
+
+        encodings[f'dino2_encoding_fov{fov}'] = data_encodings
 
     # np.savez(Path(top_path, "encodings.npz"), **encodings)
+    return encodings
 
-    # # # Create DataLoader
-    # # dataloader = DataLoader(
-    # #     dataset,
-    # #     batch_size=32,
-    # #     shuffle=True,
-    # #     num_workers=4
-    # # )
 
-    # # # Iterate
-    # # for batch_idx, (images, metadata) in enumerate(dataloader):
-    # #     print(f"Batch {batch_idx}: images shape {images.shape}")
-    # #     print(f"Materials: {metadata['material']}")
-    # #     print(f"Base temps: {metadata['base_temp']}")
-    # #     # Train/evaluate here
+if __name__ == "__main__":
+    from torch.utils.data import DataLoader
+    from crack_identification import find_cracks
+
+    top_path = Path(Path(__file__).resolve().parents[1], "data/JUDITH")
+    print(top_path)
+
+    #############################################################
+    print("Generating dataset metadata from images and Excel test matrix...")
+
+    dataset_metadata = dataset_metadata_from_path(top_path)
+    np.savez(Path(top_path, "metadata.npz"), **dataset_metadata)
+
+    dataset = JUDITHDataset(preload=True, data_path=top_path, remove_nan=False)
+
+    #############################################################
+    # Loop through all material-loadtype combinations and compute crack densities for each flux and base_temp
+
+    dataset = evaluate_crack_densities(dataset)
+    np.savez(Path(top_path, "metadata.npz"), **dataset.metadata)
+
+
+    #############################################################
+    # compute encodings
+
+    encodings = compute_encodings(dataset, fovs=[20,50,100,200], batch_size=64, detector='QBSD')
+    np.savez(Path(top_path, "encodings.npz"), **encodings)
