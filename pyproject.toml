@@ -11,14 +11,15 @@ dependencies = [
     "h5py>=3.15.1",
     "igraph>=1.0.0",
     "ipykernel>=7.1.0",
-    "jax",
+    "jax<0.10.2; sys_platform == 'win32'",
     "jax[cuda12]>=0.10.2; sys_platform == 'linux'",
     "jupyter>=1.1.1",
     "legacy-cgi>=2.6.4",
     "leidenalg>=0.11.0",
     "matplotlib>=3.10.7",
     "networkx>=3.5",
-    "numpy>=2.3.4",
+    "numpy>=1.26.4,<2; sys_platform == 'win32'",
+    "numpy>=2.0.0; sys_platform == 'linux'",
     "pandas>=2.3.3",
     "patchify>=0.1.1",
     "pip>=26.1.2",
@@ -31,8 +32,10 @@ dependencies = [
     "seaborn>=0.13.2",
     "surfalize>=0.16.6",
     "timm>=1.0.24",
-    "torch==2.3.1",
-    "torchvision==0.18.1",
+    "torch==2.3.1; sys_platform == 'linux'",
+    "torchvision==0.18.1; sys_platform == 'linux'",
+    "torch==2.9.1; sys_platform == 'win32'",
+    "torchvision==0.24.1; sys_platform == 'win32'",
     "transformers==4.46.3",
     "umap-learn>=0.5.9.post2",
 ]
@@ -42,15 +45,38 @@ members = [
     "label-studio-env",
 ]
 
+
+################################################################
+################################################################
+
+
 [[tool.uv.index]]
 name = "pytorch-cu118"
 url = "https://download.pytorch.org/whl/cu118"
 explicit = true
 
+[[tool.uv.index]]
+name = "pytorch-cu128"
+url = "https://download.pytorch.org/whl/cu128"
+explicit = true
+
 [tool.uv.sources]
 torch = [
-  { index = "pytorch-cu118", marker = "sys_platform == 'linux' or sys_platform == 'win32'" },
+  { index = "pytorch-cu118", marker = "sys_platform == 'linux'" },
+  { index = "pytorch-cu128", marker = "sys_platform == 'win32'" },
 ]
 torchvision = [
-  { index = "pytorch-cu118", marker = "sys_platform == 'linux' or sys_platform == 'win32'" },
+  { index = "pytorch-cu118", marker = "sys_platform == 'linux'" },
+  { index = "pytorch-cu128", marker = "sys_platform == 'win32'" },
+]
+
+
+################################################################
+################################################################
+
+
+[tool.uv]
+environments = [
+    # "sys_platform == 'win32'",
+    "sys_platform == 'linux'",
 ]
