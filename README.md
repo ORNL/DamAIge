@@ -1,3 +1,7 @@
+# DamAIge
+
+DamAIge is an extensible framework for automated and reproducible materials damage characterization from experimental imaging data, combining image analysis, quantitative damage descriptors, quality control, and interfaces to AI/ML and physics-based modeling.
+
 # Setup
 
 ### 1. Install Git LFS
